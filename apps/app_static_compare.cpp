@@ -2,6 +2,7 @@
 #include <fstream>
 #include <string>
 
+#include <CLI/CLI.hpp>
 #include <Eigen/Cholesky>
 #include <spdlog/spdlog.h>
 
@@ -15,33 +16,24 @@
 #include "bierman/util/csv.hpp"
 #include "bierman/util/rng.hpp"
 
-namespace {
-
-double get_arg(int argc, char** argv, const std::string& key, double def) {
-  for (int i = 1; i < argc - 1; ++i) {
-    if (key == argv[i]) {
-      return std::stod(argv[i + 1]);
-    }
-  }
-  return def;
-}
-
-unsigned int get_arg_u(int argc, char** argv, const std::string& key, unsigned int def) {
-  for (int i = 1; i < argc - 1; ++i) {
-    if (key == argv[i]) {
-      return static_cast<unsigned int>(std::stoul(argv[i + 1]));
-    }
-  }
-  return def;
-}
-
-}  // namespace
-
 int main(int argc, char** argv) {
-  const unsigned int seed = get_arg_u(argc, argv, "--seed", 7);
-  const int steps = static_cast<int>(get_arg(argc, argv, "--steps", 100));
-  const double sigma_range = get_arg(argc, argv, "--sigma_range", 0.25);
-  const std::string outdir = "output_static";
+  unsigned int seed = 7;
+  int steps = 100;
+  double sigma_range = 0.25;
+  std::string outdir = "output_static";
+  bool quiet = false;
+
+  CLI::App app{"Static 3D range-only filter comparison"};
+  std::string config_file;
+  app.set_config("--config", "", "INI/TOML config file path");
+  app.add_option("--seed", seed, "RNG seed");
+  app.add_option("--steps", steps, "Number of sequential updates");
+  app.add_option("--sigma_range", sigma_range, "Range measurement sigma");
+  app.add_option("--outdir", outdir, "Output directory");
+  app.add_flag("--quiet", quiet, "Suppress info logging");
+  CLI11_PARSE(app, argc, argv);
+
+  spdlog::set_level(quiet ? spdlog::level::warn : spdlog::level::info);
 
   std::filesystem::create_directories(outdir);
 

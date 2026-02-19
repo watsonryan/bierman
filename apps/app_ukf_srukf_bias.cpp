@@ -2,6 +2,7 @@
 #include <fstream>
 #include <string>
 
+#include <CLI/CLI.hpp>
 #include <Eigen/Cholesky>
 #include <spdlog/spdlog.h>
 
@@ -11,36 +12,27 @@
 #include "bierman/util/csv.hpp"
 #include "bierman/util/rng.hpp"
 
-namespace {
-
-double get_arg(int argc, char** argv, const std::string& key, double def) {
-  for (int i = 1; i < argc - 1; ++i) {
-    if (key == argv[i]) {
-      return std::stod(argv[i + 1]);
-    }
-  }
-  return def;
-}
-
-unsigned int get_arg_u(int argc, char** argv, const std::string& key, unsigned int def) {
-  for (int i = 1; i < argc - 1; ++i) {
-    if (key == argv[i]) {
-      return static_cast<unsigned int>(std::stoul(argv[i + 1]));
-    }
-  }
-  return def;
-}
-
-}  // namespace
-
 int main(int argc, char** argv) {
-  const unsigned int seed = get_arg_u(argc, argv, "--seed", 19);
-  const double dt = get_arg(argc, argv, "--dt", 0.1);
-  const double tf = get_arg(argc, argv, "--tf", 15.0);
-  const double sigma_range = get_arg(argc, argv, "--sigma_range", 0.3);
-  const int steps = static_cast<int>(tf / dt);
-  const std::string outdir = "output_ukf_srukf_bias";
+  unsigned int seed = 19;
+  double dt = 0.1;
+  double tf = 15.0;
+  double sigma_range = 0.3;
+  std::string outdir = "output_ukf_srukf_bias";
+  bool quiet = false;
 
+  CLI::App app{"UKF/SRUKF/Schmidt comparison with measurement bias"};
+  app.set_config("--config", "", "INI/TOML config file path");
+  app.add_option("--seed", seed, "RNG seed");
+  app.add_option("--dt", dt, "Step size");
+  app.add_option("--tf", tf, "Final time");
+  app.add_option("--sigma_range", sigma_range, "Range measurement sigma");
+  app.add_option("--outdir", outdir, "Output directory");
+  app.add_flag("--quiet", quiet, "Suppress info logging");
+  CLI11_PARSE(app, argc, argv);
+
+  spdlog::set_level(quiet ? spdlog::level::warn : spdlog::level::info);
+
+  const int steps = static_cast<int>(tf / dt);
   std::filesystem::create_directories(outdir);
   bierman::util::Rng rng(seed);
 
@@ -95,6 +87,11 @@ int main(int argc, char** argv) {
   Qaug.bottomRightCorner(nb, nb).setZero();
   Eigen::MatrixXd R = sigma_range * sigma_range * Eigen::MatrixXd::Identity(nb, nb);
 
+  bierman::filters::UTParams utp{1e-1, 0.0, 2.0};
+  bierman::filters::UKFWorkspace ukf_ws;
+  bierman::filters::SRUKFWorkspace srukf_ws;
+  bierman::filters::SRUKFDiagnostics srukf_diag;
+
   std::ofstream ftruth(outdir + "/truth.csv");
   std::ofstream fukf(outdir + "/estimates_ukf.csv");
   std::ofstream fsrukf(outdir + "/estimates_srukf.csv");
@@ -104,8 +101,6 @@ int main(int argc, char** argv) {
   bierman::util::write_csv_header(fukf, {"t", "x", "y", "z"});
   bierman::util::write_csv_header(fsrukf, {"t", "x", "y", "z"});
   bierman::util::write_csv_header(fsch, {"t", "x", "y", "z"});
-
-  bierman::filters::UTParams utp{1e-1, 0.0, 2.0};
 
   for (int k = 0; k < steps; ++k) {
     const double t = k * dt;
@@ -118,13 +113,13 @@ int main(int argc, char** argv) {
       y(i) = (truth.head<3>() - trackers.row(i).transpose()).norm() + bias_true(i) + rng.normal(0.0, sigma_range);
     }
 
-    auto ukf_pred = bierman::filters::predict(ukf_state, Qaug, utp, propagate);
-    ukf_state = bierman::filters::update(ukf_pred, y, R, measure_aug);
+    auto ukf_pred = bierman::filters::predict(ukf_state, Qaug, utp, propagate, &ukf_ws);
+    ukf_state = bierman::filters::update(ukf_pred, y, R, measure_aug, &ukf_ws);
 
     Eigen::MatrixXd Lq = Qaug.llt().matrixL();
     Eigen::MatrixXd Lr = R.llt().matrixL();
-    auto sr_pred = bierman::filters::SRUKF::predict(srukf_state, Lq, utp, propagate);
-    srukf_state = bierman::filters::SRUKF::update(sr_pred, y, Lr, measure_aug, nb);
+    auto sr_pred = bierman::filters::SRUKF::predict(srukf_state, Lq, utp, propagate, &srukf_ws, &srukf_diag);
+    srukf_state = bierman::filters::SRUKF::update(sr_pred, y, Lr, measure_aug, nb, &srukf_ws, &srukf_diag);
 
     Eigen::MatrixXd Phi = Eigen::MatrixXd::Identity(nx, nx);
     Phi.block<3, 3>(0, 3) = dt * Eigen::Matrix3d::Identity();
@@ -137,7 +132,7 @@ int main(int argc, char** argv) {
     Eigen::MatrixXd Ay = Eigen::MatrixXd::Identity(nb, nb);
     for (Eigen::Index i = 0; i < trackers.rows(); ++i) {
       Eigen::Vector3d d = sch.x.head<3>() - trackers.row(i).transpose();
-      double rr = d.norm();
+      const double rr = d.norm();
       yhat(i) = rr;
       if (rr > 0.0) {
         Ax.block<1, 3>(i, 0) = (d / rr).transpose();
@@ -152,5 +147,9 @@ int main(int argc, char** argv) {
   }
 
   spdlog::info("Wrote UKF/SRUKF/Schmidt bias comparison CSV files to {}", outdir);
+  spdlog::info("SRUKF fallbacks: predict={}, meas={}, state={}",
+               srukf_diag.predict_cov_fallbacks,
+               srukf_diag.meas_cov_fallbacks,
+               srukf_diag.state_cov_fallbacks);
   return 0;
 }

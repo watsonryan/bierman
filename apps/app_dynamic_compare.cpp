@@ -2,6 +2,7 @@
 #include <fstream>
 #include <string>
 
+#include <CLI/CLI.hpp>
 #include <Eigen/Cholesky>
 #include <spdlog/spdlog.h>
 
@@ -15,24 +16,6 @@
 #include "bierman/util/rng.hpp"
 
 namespace {
-
-double get_arg(int argc, char** argv, const std::string& key, double def) {
-  for (int i = 1; i < argc - 1; ++i) {
-    if (key == argv[i]) {
-      return std::stod(argv[i + 1]);
-    }
-  }
-  return def;
-}
-
-unsigned int get_arg_u(int argc, char** argv, const std::string& key, unsigned int def) {
-  for (int i = 1; i < argc - 1; ++i) {
-    if (key == argv[i]) {
-      return static_cast<unsigned int>(std::stoul(argv[i + 1]));
-    }
-  }
-  return def;
-}
 
 Eigen::VectorXd range_predict(const Eigen::Ref<const Eigen::VectorXd>& x, const Eigen::Ref<const Eigen::MatrixXd>& trackers) {
   Eigen::VectorXd y(trackers.rows());
@@ -57,13 +40,26 @@ Eigen::MatrixXd range_jac(const Eigen::Ref<const Eigen::VectorXd>& x, const Eige
 }  // namespace
 
 int main(int argc, char** argv) {
-  const unsigned int seed = get_arg_u(argc, argv, "--seed", 11);
-  const double dt = get_arg(argc, argv, "--dt", 0.1);
-  const double tf = get_arg(argc, argv, "--tf", 20.0);
-  const double sigma_range = get_arg(argc, argv, "--sigma_range", 0.2);
-  const int steps = static_cast<int>(tf / dt);
-  const std::string outdir = "output_dynamic";
+  unsigned int seed = 11;
+  double dt = 0.1;
+  double tf = 20.0;
+  double sigma_range = 0.2;
+  std::string outdir = "output_dynamic";
+  bool quiet = false;
 
+  CLI::App app{"Dynamic range-only filter comparison"};
+  app.set_config("--config", "", "INI/TOML config file path");
+  app.add_option("--seed", seed, "RNG seed");
+  app.add_option("--dt", dt, "Step size");
+  app.add_option("--tf", tf, "Final time");
+  app.add_option("--sigma_range", sigma_range, "Range measurement sigma");
+  app.add_option("--outdir", outdir, "Output directory");
+  app.add_flag("--quiet", quiet, "Suppress info logging");
+  CLI11_PARSE(app, argc, argv);
+
+  spdlog::set_level(quiet ? spdlog::level::warn : spdlog::level::info);
+
+  const int steps = static_cast<int>(tf / dt);
   std::filesystem::create_directories(outdir);
 
   Eigen::MatrixXd trackers(8, 3);

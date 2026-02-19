@@ -11,7 +11,6 @@ option(BIERMAN_FETCH_DEPS "Allow fetching third-party dependencies from network"
 if(BIERMAN_FETCH_DEPS)
   set(CPM_DOWNLOAD_VERSION 0.40.2)
   set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-  # Shared cache prevents repeated dependency downloads across build dirs.
   set(CPM_SOURCE_CACHE "${CMAKE_CURRENT_SOURCE_DIR}/.cpm-cache")
   if(NOT EXISTS ${CPM_DOWNLOAD_LOCATION})
     file(DOWNLOAD
@@ -32,9 +31,15 @@ if(BIERMAN_FETCH_DEPS)
     URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
     OPTIONS "SPDLOG_BUILD_TESTS OFF" "SPDLOG_BUILD_EXAMPLE OFF" "SPDLOG_BUILD_BENCH OFF" "SPDLOG_FMT_EXTERNAL OFF"
   )
+
+  CPMAddPackage(
+    NAME CLI11
+    URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.4.2.tar.gz
+  )
 else()
   find_package(Eigen3 5.0 CONFIG QUIET)
   find_package(spdlog CONFIG QUIET)
+  find_package(CLI11 CONFIG QUIET)
 endif()
 
 if(NOT TARGET Eigen3::Eigen AND TARGET eigen)
@@ -56,6 +61,10 @@ else()
   message(FATAL_ERROR "spdlog target not available. Set BIERMAN_FETCH_DEPS=ON or install spdlog.")
 endif()
 
+if(NOT TARGET CLI11::CLI11)
+  message(FATAL_ERROR "CLI11::CLI11 target not available. Set BIERMAN_FETCH_DEPS=ON or install CLI11.")
+endif()
+
 add_library(bierman INTERFACE)
 add_library(bierman::bierman ALIAS bierman)
 
@@ -64,7 +73,7 @@ target_include_directories(bierman INTERFACE
   $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(bierman INTERFACE Eigen3::Eigen ${BIERMAN_SPDLOG_TARGET})
+target_link_libraries(bierman INTERFACE Eigen3::Eigen ${BIERMAN_SPDLOG_TARGET} CLI11::CLI11)
 
 add_executable(app_static_compare apps/app_static_compare.cpp)
 target_link_libraries(app_static_compare PRIVATE bierman::bierman)
@@ -100,3 +109,12 @@ add_test(NAME test_filter_equivalence_linear COMMAND test_filter_equivalence_lin
 add_executable(test_ukf_srukf tests/test_ukf_srukf.cpp)
 target_link_libraries(test_ukf_srukf PRIVATE bierman::bierman)
 add_test(NAME test_ukf_srukf COMMAND test_ukf_srukf)
+
+add_executable(test_srukf_stress tests/test_srukf_stress.cpp)
+target_link_libraries(test_srukf_stress PRIVATE bierman::bierman)
+add_test(NAME test_srukf_stress COMMAND test_srukf_stress)
+
+add_executable(test_regression_metrics tests/test_regression_metrics.cpp)
+target_link_libraries(test_regression_metrics PRIVATE bierman::bierman)
+add_test(NAME test_regression_metrics COMMAND test_regression_metrics)
+set_tests_properties(test_regression_metrics PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
