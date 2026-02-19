@@ -6,31 +6,55 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(CPM_DOWNLOAD_VERSION 0.40.2)
-set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
-if(NOT EXISTS ${CPM_DOWNLOAD_LOCATION})
-  file(DOWNLOAD
-    "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake"
-    ${CPM_DOWNLOAD_LOCATION}
+option(BIERMAN_FETCH_DEPS "Allow fetching third-party dependencies from network" ON)
+
+if(BIERMAN_FETCH_DEPS)
+  set(CPM_DOWNLOAD_VERSION 0.40.2)
+  set(CPM_DOWNLOAD_LOCATION "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
+  # Shared cache prevents repeated dependency downloads across build dirs.
+  set(CPM_SOURCE_CACHE "${CMAKE_CURRENT_SOURCE_DIR}/.cpm-cache")
+  if(NOT EXISTS ${CPM_DOWNLOAD_LOCATION})
+    file(DOWNLOAD
+      "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake"
+      ${CPM_DOWNLOAD_LOCATION}
+    )
+  endif()
+  include(${CPM_DOWNLOAD_LOCATION})
+
+  CPMAddPackage(
+    NAME eigen
+    URL https://gitlab.com/libeigen/eigen/-/archive/5.0.1/eigen-5.0.1.tar.gz
+    OPTIONS "EIGEN_BUILD_DOC OFF" "EIGEN_BUILD_PKGCONFIG OFF" "BUILD_TESTING OFF"
+  )
+
+  CPMAddPackage(
+    NAME spdlog
+    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
+    OPTIONS "SPDLOG_BUILD_TESTS OFF" "SPDLOG_BUILD_EXAMPLE OFF" "SPDLOG_BUILD_BENCH OFF" "SPDLOG_FMT_EXTERNAL OFF"
+  )
+else()
+  find_package(Eigen3 5.0 CONFIG QUIET)
+  find_package(spdlog CONFIG QUIET)
+endif()
+
+if(NOT TARGET Eigen3::Eigen AND TARGET eigen)
+  add_library(Eigen3::Eigen INTERFACE IMPORTED)
+  set_target_properties(Eigen3::Eigen PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${eigen_SOURCE_DIR}"
   )
 endif()
-include(${CPM_DOWNLOAD_LOCATION})
 
-CPMAddPackage(
-  NAME eigen
-  URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
-  OPTIONS
-    "BUILD_TESTING OFF"
-    "EIGEN_BUILD_TESTING OFF"
-    "EIGEN_BUILD_DOC OFF"
-    "EIGEN_BUILD_PKGCONFIG OFF"
-)
+if(NOT TARGET Eigen3::Eigen)
+  message(FATAL_ERROR "Eigen3::Eigen not found. Set BIERMAN_FETCH_DEPS=ON or install Eigen 5.x.")
+endif()
 
-CPMAddPackage(
-  NAME spdlog
-  GITHUB_REPOSITORY gabime/spdlog
-  GIT_TAG v1.14.1
-)
+if(TARGET spdlog::spdlog)
+  set(BIERMAN_SPDLOG_TARGET spdlog::spdlog)
+elseif(TARGET spdlog::spdlog_header_only)
+  set(BIERMAN_SPDLOG_TARGET spdlog::spdlog_header_only)
+else()
+  message(FATAL_ERROR "spdlog target not available. Set BIERMAN_FETCH_DEPS=ON or install spdlog.")
+endif()
 
 add_library(bierman INTERFACE)
 add_library(bierman::bierman ALIAS bierman)
@@ -40,7 +64,7 @@ target_include_directories(bierman INTERFACE
   $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(bierman INTERFACE Eigen3::Eigen spdlog::spdlog)
+target_link_libraries(bierman INTERFACE Eigen3::Eigen ${BIERMAN_SPDLOG_TARGET})
 
 add_executable(app_static_compare apps/app_static_compare.cpp)
 target_link_libraries(app_static_compare PRIVATE bierman::bierman)
