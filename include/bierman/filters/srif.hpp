@@ -23,15 +23,17 @@ class SRIF {
     double residual_ss = 0.0;
   };
 
+  // Convention: pass linearized pseudo-observations in absolute-state form,
+  // z_lin = y - h(x_ref) + H*x_ref, so the information solve returns absolute x.
   static UpdateResult update_householder(const SRIFState& prior,
                                          const Eigen::Ref<const Eigen::MatrixXd>& H,
-                                         const Eigen::Ref<const Eigen::VectorXd>& r,
+                                         const Eigen::Ref<const Eigen::VectorXd>& z_lin,
                                          const Eigen::Ref<const Eigen::MatrixXd>& sqrtW) {
     const Eigen::Index n = prior.R.rows();
     if (prior.R.rows() != prior.R.cols() || prior.z.size() != n) {
       throw std::invalid_argument("SRIF prior dimension mismatch");
     }
-    if (H.cols() != n || H.rows() != r.size() || sqrtW.rows() != r.size() || sqrtW.cols() != r.size()) {
+    if (H.cols() != n || H.rows() != z_lin.size() || sqrtW.rows() != z_lin.size() || sqrtW.cols() != z_lin.size()) {
       throw std::invalid_argument("SRIF update dimension mismatch");
     }
 
@@ -39,7 +41,7 @@ class SRIF {
     A.topRows(n).leftCols(n) = prior.R;
     A.topRows(n).col(n) = prior.z;
     A.bottomRows(H.rows()).leftCols(n) = sqrtW * H;
-    A.bottomRows(H.rows()).col(n) = sqrtW * r;
+    A.bottomRows(H.rows()).col(n) = sqrtW * z_lin;
 
     Eigen::HouseholderQR<Eigen::MatrixXd> qr(A);
     Eigen::MatrixXd T = qr.householderQ().adjoint() * A;
@@ -57,9 +59,10 @@ class SRIF {
     return res;
   }
 
+  // Same linearization convention as update_householder().
   static UpdateResult update_qr_mgs(const SRIFState& prior,
                                     const Eigen::Ref<const Eigen::MatrixXd>& H,
-                                    const Eigen::Ref<const Eigen::VectorXd>& r,
+                                    const Eigen::Ref<const Eigen::VectorXd>& z_lin,
                                     const Eigen::Ref<const Eigen::MatrixXd>& sqrtW) {
     const Eigen::Index n = prior.R.rows();
     if (prior.R.rows() != prior.R.cols() || prior.z.size() != n) {
@@ -70,9 +73,9 @@ class SRIF {
     A.topRows(n) = prior.R;
     A.bottomRows(H.rows()) = sqrtW * H;
 
-    Eigen::VectorXd y(n + r.size());
+    Eigen::VectorXd y(n + z_lin.size());
     y.head(n) = prior.z;
-    y.tail(r.size()) = sqrtW * r;
+    y.tail(z_lin.size()) = sqrtW * z_lin;
 
     const auto qr = bierman::linalg::qr_mgs(A);
     const Eigen::VectorXd qty = qr.Q.transpose() * y;

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cmath>
-#include <functional>
 #include <stdexcept>
 
 #include <Eigen/Cholesky>
@@ -30,6 +29,15 @@ struct UKFPrediction {
   UKFState state;
   Eigen::MatrixXd sigma;  // Propagated sigma points
   UTWeights weights;
+};
+
+// Workspace to reduce repeated allocations in tight filter loops.
+struct UKFWorkspace {
+  Eigen::MatrixXd Chi;
+  Eigen::MatrixXd Y;
+  Eigen::VectorXd ybar;
+  Eigen::MatrixXd Pyy;
+  Eigen::MatrixXd Pxy;
 };
 
 inline UTWeights sigma_weights(Eigen::Index n, const UTParams& p) {
@@ -80,7 +88,8 @@ template <typename PropagateFn>
 inline UKFPrediction predict(const UKFState& in,
                              const Eigen::Ref<const Eigen::MatrixXd>& Q,
                              const UTParams& p,
-                             PropagateFn&& propagate) {
+                             PropagateFn&& propagate,
+                             UKFWorkspace* ws = nullptr) {
   const Eigen::Index n = in.x.size();
   if (in.P.rows() != n || in.P.cols() != n || Q.rows() != n || Q.cols() != n) {
     throw std::invalid_argument("UKF predict dimension mismatch");
@@ -89,10 +98,16 @@ inline UKFPrediction predict(const UKFState& in,
   UKFPrediction pred;
   pred.weights = sigma_weights(n, p);
 
-  const Eigen::MatrixXd Chi = sigma_points(in.x, in.P, p);
-  pred.sigma.resize(n, Chi.cols());
-  for (Eigen::Index i = 0; i < Chi.cols(); ++i) {
-    pred.sigma.col(i) = propagate(Chi.col(i));
+  const Eigen::MatrixXd Chi_tmp = sigma_points(in.x, in.P, p);
+  const Eigen::MatrixXd* Chi_ptr = &Chi_tmp;
+  if (ws != nullptr) {
+    ws->Chi = Chi_tmp;
+    Chi_ptr = &ws->Chi;
+  }
+
+  pred.sigma.resize(n, Chi_ptr->cols());
+  for (Eigen::Index i = 0; i < Chi_ptr->cols(); ++i) {
+    pred.sigma.col(i) = propagate(Chi_ptr->col(i));
   }
 
   pred.state.x = Eigen::VectorXd::Zero(n);
@@ -114,7 +129,8 @@ template <typename MeasureFn>
 inline UKFState update(const UKFPrediction& pred,
                        const Eigen::Ref<const Eigen::VectorXd>& y,
                        const Eigen::Ref<const Eigen::MatrixXd>& R,
-                       MeasureFn&& measure) {
+                       MeasureFn&& measure,
+                       UKFWorkspace* ws = nullptr) {
   const Eigen::Index n = pred.state.x.size();
   const Eigen::Index nsig = pred.sigma.cols();
 
@@ -124,31 +140,51 @@ inline UKFState update(const UKFPrediction& pred,
     throw std::invalid_argument("UKF update dimension mismatch");
   }
 
-  Eigen::MatrixXd Y(m, nsig);
-  Y.col(0) = y0;
+  Eigen::MatrixXd Y_local(m, nsig);
+  Eigen::MatrixXd* Y = &Y_local;
+  if (ws != nullptr) {
+    ws->Y.resize(m, nsig);
+    Y = &ws->Y;
+  }
+  Y->col(0) = y0;
   for (Eigen::Index i = 1; i < nsig; ++i) {
-    Y.col(i) = measure(pred.sigma.col(i));
+    Y->col(i) = measure(pred.sigma.col(i));
   }
 
-  Eigen::VectorXd ybar = Eigen::VectorXd::Zero(m);
+  Eigen::VectorXd ybar_local = Eigen::VectorXd::Zero(m);
+  Eigen::VectorXd* ybar = &ybar_local;
+  if (ws != nullptr) {
+    ws->ybar = Eigen::VectorXd::Zero(m);
+    ybar = &ws->ybar;
+  }
+
   for (Eigen::Index i = 0; i < nsig; ++i) {
-    ybar += pred.weights.wm(i) * Y.col(i);
+    *ybar += pred.weights.wm(i) * Y->col(i);
   }
 
-  Eigen::MatrixXd Pyy = R;
-  Eigen::MatrixXd Pxy = Eigen::MatrixXd::Zero(n, m);
+  Eigen::MatrixXd Pyy_local = R;
+  Eigen::MatrixXd Pxy_local = Eigen::MatrixXd::Zero(n, m);
+  Eigen::MatrixXd* Pyy = &Pyy_local;
+  Eigen::MatrixXd* Pxy = &Pxy_local;
+  if (ws != nullptr) {
+    ws->Pyy = R;
+    ws->Pxy = Eigen::MatrixXd::Zero(n, m);
+    Pyy = &ws->Pyy;
+    Pxy = &ws->Pxy;
+  }
+
   for (Eigen::Index i = 0; i < nsig; ++i) {
     const Eigen::VectorXd dx = pred.sigma.col(i) - pred.state.x;
-    const Eigen::VectorXd dy = Y.col(i) - ybar;
-    Pyy += pred.weights.wc(i) * (dy * dy.transpose());
-    Pxy += pred.weights.wc(i) * (dx * dy.transpose());
+    const Eigen::VectorXd dy = Y->col(i) - *ybar;
+    *Pyy += pred.weights.wc(i) * (dy * dy.transpose());
+    *Pxy += pred.weights.wc(i) * (dx * dy.transpose());
   }
 
-  const Eigen::MatrixXd K = Pxy * Pyy.ldlt().solve(Eigen::MatrixXd::Identity(m, m));
+  const Eigen::MatrixXd K = (*Pxy) * Pyy->ldlt().solve(Eigen::MatrixXd::Identity(m, m));
 
   UKFState out = pred.state;
-  out.x += K * (y - ybar);
-  out.P -= K * Pyy * K.transpose();
+  out.x += K * (y - *ybar);
+  out.P -= K * (*Pyy) * K.transpose();
   out.P = 0.5 * (out.P + out.P.transpose());
   return out;
 }

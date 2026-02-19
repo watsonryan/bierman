@@ -3,12 +3,11 @@
 #include <cmath>
 #include <stdexcept>
 
-#include <Eigen/Cholesky>
 #include <Eigen/Core>
 
 #include "bierman/filters/ukf.hpp"
+#include "bierman/internal/srukf_detail.hpp"
 #include "bierman/linalg/chol_update.hpp"
-#include "bierman/linalg/triangular.hpp"
 
 namespace bierman::filters {
 
@@ -23,30 +22,31 @@ struct SRUKFPrediction {
   UTWeights weights;
 };
 
-class SRUKF {
- private:
-  static Eigen::MatrixXd robust_chol(const Eigen::Ref<const Eigen::MatrixXd>& Pin,
-                                     const char* err_msg) {
-    Eigen::MatrixXd P = 0.5 * (Pin + Pin.transpose());
-    const Eigen::Index n = P.rows();
-    const Eigen::MatrixXd I = Eigen::MatrixXd::Identity(n, n);
-    double jitter = 1e-12;
-    for (int k = 0; k < 12; ++k) {
-      Eigen::LLT<Eigen::MatrixXd> llt(P + jitter * I);
-      if (llt.info() == Eigen::Success) {
-        return llt.matrixL();
-      }
-      jitter *= 10.0;
-    }
-    throw std::runtime_error(err_msg);
-  }
+struct SRUKFDiagnostics {
+  int predict_cov_fallbacks = 0;
+  int meas_cov_fallbacks = 0;
+  int state_cov_fallbacks = 0;
+};
 
+// Reusable workspace for allocation-light SRUKF loops.
+struct SRUKFWorkspace {
+  Eigen::MatrixXd Chi;
+  Eigen::MatrixXd Y;
+  Eigen::VectorXd ybar;
+  Eigen::MatrixXd Sy;
+  Eigen::MatrixXd Pxy;
+  Eigen::MatrixXd U;
+};
+
+class SRUKF {
  public:
   template <typename PropagateFn>
   static SRUKFPrediction predict(const SRUKFState& in,
                                  const Eigen::Ref<const Eigen::MatrixXd>& Lq,
                                  const UTParams& p,
-                                 PropagateFn&& propagate) {
+                                 PropagateFn&& propagate,
+                                 SRUKFWorkspace* ws = nullptr,
+                                 SRUKFDiagnostics* diag = nullptr) {
     const Eigen::Index n = in.x.size();
     if (in.L.rows() != n || in.L.cols() != n || Lq.rows() != n || Lq.cols() != n) {
       throw std::invalid_argument("SRUKF predict dimension mismatch");
@@ -60,18 +60,24 @@ class SRUKF {
       throw std::invalid_argument("SRUKF invalid UT scaling");
     }
 
-    Eigen::MatrixXd Chi(n, 2 * n + 1);
-    Chi.col(0) = in.x;
+    Eigen::MatrixXd Chi_local(n, 2 * n + 1);
+    Eigen::MatrixXd* Chi = &Chi_local;
+    if (ws != nullptr) {
+      ws->Chi.resize(n, 2 * n + 1);
+      Chi = &ws->Chi;
+    }
+
+    Chi->col(0) = in.x;
     const double scale = std::sqrt(c);
     for (Eigen::Index i = 0; i < n; ++i) {
       const Eigen::VectorXd v = scale * in.L.col(i);
-      Chi.col(1 + i) = in.x + v;
-      Chi.col(1 + n + i) = in.x - v;
+      Chi->col(1 + i) = in.x + v;
+      Chi->col(1 + n + i) = in.x - v;
     }
 
-    pred.sigma.resize(n, Chi.cols());
-    for (Eigen::Index i = 0; i < Chi.cols(); ++i) {
-      pred.sigma.col(i) = propagate(Chi.col(i));
+    pred.sigma.resize(n, Chi->cols());
+    for (Eigen::Index i = 0; i < Chi->cols(); ++i) {
+      pred.sigma.col(i) = propagate(Chi->col(i));
     }
 
     pred.state.x = Eigen::VectorXd::Zero(n);
@@ -101,7 +107,10 @@ class SRUKF {
         const Eigen::VectorXd dx = pred.sigma.col(i) - pred.state.x;
         P += pred.weights.wc(i) * (dx * dx.transpose());
       }
-      pred.state.L = robust_chol(P, "SRUKF predict covariance factorization failed");
+      pred.state.L = bierman::internal::robust_chol_with_jitter(P, "SRUKF predict covariance factorization failed");
+      if (diag != nullptr) {
+        ++diag->predict_cov_fallbacks;
+      }
     }
 
     return pred;
@@ -112,7 +121,9 @@ class SRUKF {
                            const Eigen::Ref<const Eigen::VectorXd>& y,
                            const Eigen::Ref<const Eigen::MatrixXd>& Lr,
                            MeasureFn&& measure,
-                           Eigen::Index consider_count = 0) {
+                           Eigen::Index consider_count = 0,
+                           SRUKFWorkspace* ws = nullptr,
+                           SRUKFDiagnostics* diag = nullptr) {
     const Eigen::Index n = pred.state.x.size();
     const Eigen::Index nsig = pred.sigma.cols();
 
@@ -122,45 +133,68 @@ class SRUKF {
       throw std::invalid_argument("SRUKF update dimension mismatch");
     }
 
-    Eigen::MatrixXd Y(m, nsig);
-    Y.col(0) = y0;
+    Eigen::MatrixXd Y_local(m, nsig);
+    Eigen::MatrixXd* Y = &Y_local;
+    if (ws != nullptr) {
+      ws->Y.resize(m, nsig);
+      Y = &ws->Y;
+    }
+
+    Y->col(0) = y0;
     for (Eigen::Index i = 1; i < nsig; ++i) {
-      Y.col(i) = measure(pred.sigma.col(i));
+      Y->col(i) = measure(pred.sigma.col(i));
     }
 
-    Eigen::VectorXd ybar = Eigen::VectorXd::Zero(m);
+    Eigen::VectorXd ybar_local = Eigen::VectorXd::Zero(m);
+    Eigen::VectorXd* ybar = &ybar_local;
+    if (ws != nullptr) {
+      ws->ybar = Eigen::VectorXd::Zero(m);
+      ybar = &ws->ybar;
+    }
+
     for (Eigen::Index i = 0; i < nsig; ++i) {
-      ybar += pred.weights.wm(i) * Y.col(i);
+      *ybar += pred.weights.wm(i) * Y->col(i);
     }
 
-    Eigen::MatrixXd Sy = Lr;
-    Eigen::MatrixXd Pxy = Eigen::MatrixXd::Zero(n, m);
-    bool sy_fallback = false;
+    Eigen::MatrixXd Sy_local = Lr;
+    Eigen::MatrixXd Pxy_local = Eigen::MatrixXd::Zero(n, m);
+    Eigen::MatrixXd* Sy = &Sy_local;
+    Eigen::MatrixXd* Pxy = &Pxy_local;
+    if (ws != nullptr) {
+      ws->Sy = Lr;
+      ws->Pxy = Eigen::MatrixXd::Zero(n, m);
+      Sy = &ws->Sy;
+      Pxy = &ws->Pxy;
+    }
 
+    bool sy_fallback = false;
     for (Eigen::Index i = 0; i < nsig; ++i) {
       const Eigen::VectorXd dx = pred.sigma.col(i) - pred.state.x;
-      const Eigen::VectorXd dy = Y.col(i) - ybar;
+      const Eigen::VectorXd dy = Y->col(i) - *ybar;
       const double w = pred.weights.wc(i);
       if (w != 0.0) {
-        const bool ok = bierman::linalg::chol_rank1_update_lower(Sy, std::sqrt(std::abs(w)) * dy, w > 0.0 ? 1.0 : -1.0);
+        const bool ok = bierman::linalg::chol_rank1_update_lower(*Sy, std::sqrt(std::abs(w)) * dy, w > 0.0 ? 1.0 : -1.0);
         if (!ok) {
           sy_fallback = true;
         }
       }
-      Pxy += w * dx * dy.transpose();
+      *Pxy += w * dx * dy.transpose();
     }
 
     if (sy_fallback) {
       Eigen::MatrixXd Pyy = Lr * Lr.transpose();
       for (Eigen::Index i = 0; i < nsig; ++i) {
-        const Eigen::VectorXd dy = Y.col(i) - ybar;
+        const Eigen::VectorXd dy = Y->col(i) - *ybar;
         Pyy += pred.weights.wc(i) * (dy * dy.transpose());
       }
-      Sy = robust_chol(Pyy, "SRUKF measurement covariance factorization failed");
+      *Sy = bierman::internal::robust_chol_with_jitter(Pyy, "SRUKF measurement covariance factorization failed");
+      if (diag != nullptr) {
+        ++diag->meas_cov_fallbacks;
+      }
     }
 
-    Eigen::MatrixXd Sy_inv_PxyT = Sy.triangularView<Eigen::Lower>().solve(Pxy.transpose());
-    Eigen::MatrixXd Kt = Sy.transpose().triangularView<Eigen::Upper>().solve(Sy_inv_PxyT);
+    Eigen::MatrixXd Sy_inv_PxyT = Sy->triangularView<Eigen::Lower>().solve(Pxy->transpose());
+    Eigen::MatrixXd Kt = Sy->transpose().triangularView<Eigen::Upper>().solve(Sy_inv_PxyT);
     Eigen::MatrixXd K = Kt.transpose();
 
     SRUKFState out = pred.state;
@@ -171,14 +205,20 @@ class SRUKF {
       K.bottomRows(consider_count).setZero();
     }
 
-    out.x += K * (y - ybar);
+    out.x += K * (y - *ybar);
 
     const Eigen::MatrixXd L_before = out.L;
-    const Eigen::MatrixXd U = K * Sy.transpose();
+
+    Eigen::MatrixXd U_local = K * Sy->transpose();
+    Eigen::MatrixXd* U = &U_local;
+    if (ws != nullptr) {
+      ws->U = U_local;
+      U = &ws->U;
+    }
 
     bool state_fallback = false;
-    for (Eigen::Index i = 0; i < U.cols(); ++i) {
-      const bool ok = bierman::linalg::chol_rank1_update_lower(out.L, U.col(i), -1.0);
+    for (Eigen::Index i = 0; i < U->cols(); ++i) {
+      const bool ok = bierman::linalg::chol_rank1_update_lower(out.L, U->col(i), -1.0);
       if (!ok) {
         state_fallback = true;
         break;
@@ -187,9 +227,12 @@ class SRUKF {
 
     if (state_fallback) {
       Eigen::MatrixXd Ppred = L_before * L_before.transpose();
-      Eigen::MatrixXd Pyy = Sy * Sy.transpose();
+      Eigen::MatrixXd Pyy = (*Sy) * Sy->transpose();
       Eigen::MatrixXd P = Ppred - K * Pyy * K.transpose();
-      out.L = robust_chol(P, "SRUKF state covariance factorization failed");
+      out.L = bierman::internal::robust_chol_with_jitter(P, "SRUKF state covariance factorization failed");
+      if (diag != nullptr) {
+        ++diag->state_cov_fallbacks;
+      }
     }
 
     if (consider_count > 0) {
