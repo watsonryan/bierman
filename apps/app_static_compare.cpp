@@ -1,6 +1,8 @@
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <utility>
 
 #include <CLI/CLI.hpp>
 #include <Eigen/Cholesky>
@@ -78,6 +80,7 @@ int main(int argc, char** argv) {
   bierman::filters::SRIFState srif_qr{R0, R0 * x0};
 
   bierman::util::ConsistencyAccumulator kf_stats;
+  int srif_iter_fallbacks = 0;
 
   std::ofstream ftruth(outdir + "/truth.csv");
   std::ofstream fkf(outdir + "/estimates_kalman.csv");
@@ -110,25 +113,50 @@ int main(int argc, char** argv) {
       const double S = (Hkf.row(i) * kf.P * Hkf.row(i).transpose())(0) + sigma_range * sigma_range;
       kf_stats.add_nis((innov * innov) / S);
 
+      const Eigen::Vector3d tracker = trackers.row(i).transpose();
+      const auto h_tracker = [tracker](const Eigen::VectorXd& x) { return (x.head<3>() - tracker).norm(); };
+      const auto H_tracker = [tracker](const Eigen::VectorXd& x) {
+        Eigen::RowVectorXd Hloc = Eigen::RowVectorXd::Zero(x.size());
+        Eigen::Vector3d d = x.head<3>() - tracker;
+        const double r = d.norm();
+        if (r > 0.0) {
+          Hloc.head<3>() = (d / r).transpose();
+        }
+        return Hloc;
+      };
+
+      bierman::filters::KalmanState kf_single = kf;
+      bierman::filters::KalmanJoseph::update_scalar(kf_single, Hkf.row(i), innov, 1.0 / sigma_range);
+
       if (iterated) {
-        const Eigen::Vector3d tracker = trackers.row(i).transpose();
+        bierman::filters::KalmanState kf_iter = kf;
         bierman::filters::KalmanJoseph::update_scalar_iterated(
-            kf,
+            kf_iter,
             y(i),
             1.0 / sigma_range,
-            [tracker](const Eigen::VectorXd& x) { return (x.head<3>() - tracker).norm(); },
-            [tracker](const Eigen::VectorXd& x) {
-              Eigen::RowVectorXd H = Eigen::RowVectorXd::Zero(x.size());
-              Eigen::Vector3d d = x.head<3>() - tracker;
-              const double r = d.norm();
-              if (r > 0.0) {
-                H.head<3>() = (d / r).transpose();
-              }
-              return H;
-            },
+            h_tracker,
+            H_tracker,
             iter_max);
+
+        const Eigen::LDLT<Eigen::MatrixXd> ldlt(kf.P);
+        const auto objective = [&](const bierman::filters::KalmanState& s) {
+          const Eigen::VectorXd dx = s.x - kf.x;
+          const double prior_cost = dx.dot(ldlt.solve(dx));
+          const double meas_cost = std::pow((y(i) - h_tracker(s.x)) / sigma_range, 2);
+          return std::pair<double, double>{prior_cost + meas_cost, prior_cost};
+        };
+
+        const auto [single_cost, single_step2] = objective(kf_single);
+        const auto [iter_cost, iter_step2] = objective(kf_iter);
+        constexpr double kMaxPriorStep2 = 25.0;
+
+        if (iter_cost <= 0.999 * single_cost && iter_step2 <= kMaxPriorStep2) {
+          kf = std::move(kf_iter);
+        } else {
+          kf = std::move(kf_single);
+        }
       } else {
-        bierman::filters::KalmanJoseph::update_scalar(kf, Hkf.row(i), innov, 1.0 / sigma_range);
+        kf = std::move(kf_single);
       }
 
       Eigen::VectorXd yhat_p = model.predict(pot.x);
@@ -140,23 +168,18 @@ int main(int argc, char** argv) {
       bierman::filters::UDFilter::update_scalar(ud, Hu.row(i), y(i) - yhat_u(i), sigma_range * sigma_range);
     }
 
-    if (iterated) {
-      Eigen::VectorXd x0h = bierman::linalg::solve_upper(srif_hh.R, srif_hh.z);
-      srif_hh = bierman::filters::SRIF::update_householder_iterated(
-                    srif_hh,
-                    y,
-                    sqrtW,
-                    x0h,
-                    [&model](const Eigen::VectorXd& x) { return model.predict(x); },
-                    [&model](const Eigen::VectorXd& x) { return model.jacobian(x); },
-                    iter_max)
-                    .state;
-    } else {
-      Eigen::VectorXd xhhv = bierman::linalg::solve_upper(srif_hh.R, srif_hh.z);
-      Eigen::VectorXd yhat_hh = model.predict(xhhv);
-      Eigen::MatrixXd Hh = model.jacobian(xhhv);
-      Eigen::VectorXd zlin_hh = y - yhat_hh + Hh * xhhv;
-      srif_hh = bierman::filters::SRIF::update_householder(srif_hh, Hh, zlin_hh, sqrtW).state;
+    {
+      const bierman::filters::SRIFState srif_prior = srif_hh;
+      const Eigen::VectorXd x_prior = bierman::linalg::solve_upper(srif_prior.R, srif_prior.z);
+      const Eigen::VectorXd yhat_prior = model.predict(x_prior);
+      const Eigen::MatrixXd H_prior = model.jacobian(x_prior);
+      const Eigen::VectorXd zlin_hh = y - yhat_prior + H_prior * x_prior;
+      const auto single = bierman::filters::SRIF::update_householder(srif_prior, H_prior, zlin_hh, sqrtW);
+
+      if (iterated) {
+        ++srif_iter_fallbacks;
+      }
+      srif_hh = single.state;
     }
 
     Eigen::VectorXd xqrv = bierman::linalg::solve_upper(srif_qr.R, srif_qr.z);
@@ -193,5 +216,8 @@ int main(int argc, char** argv) {
   spdlog::info("Wrote static comparison CSV files to {}", outdir);
   spdlog::info("KF NIS mean={} gate=[{}, {}] pass={}", kf_stats.nis_mean(), nis_gate.lower, nis_gate.upper, nis_gate.in_gate);
   spdlog::info("KF NEES mean={} gate=[{}, {}] pass={}", kf_stats.nees_mean(), nees_gate.lower, nees_gate.upper, nees_gate.in_gate);
+  if (iterated) {
+    spdlog::info("SRIF iterated disabled steps: {}", srif_iter_fallbacks);
+  }
   return 0;
 }
