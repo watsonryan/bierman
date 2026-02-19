@@ -40,3 +40,17 @@ target_include_directories(bierman INTERFACE
 )
 
 target_link_libraries(bierman INTERFACE Eigen3::Eigen spdlog::spdlog)
+
+enable_testing()
+
+add_executable(test_ud tests/test_ud.cpp)
+target_link_libraries(test_ud PRIVATE bierman::bierman)
+add_test(NAME test_ud COMMAND test_ud)
+
+add_executable(test_qr tests/test_qr.cpp)
+target_link_libraries(test_qr PRIVATE bierman::bierman)
+add_test(NAME test_qr COMMAND test_qr)
+
+add_executable(test_chol_update tests/test_chol_update.cpp)
+target_link_libraries(test_chol_update PRIVATE bierman::bierman)
+add_test(NAME test_chol_update COMMAND test_chol_update)
