@@ -118,3 +118,11 @@ add_executable(test_regression_metrics tests/test_regression_metrics.cpp)
 target_link_libraries(test_regression_metrics PRIVATE bierman::bierman)
 add_test(NAME test_regression_metrics COMMAND test_regression_metrics)
 set_tests_properties(test_regression_metrics PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(test_iterated_updates tests/test_iterated_updates.cpp)
+target_link_libraries(test_iterated_updates PRIVATE bierman::bierman)
+add_test(NAME test_iterated_updates COMMAND test_iterated_updates)
+
+add_executable(test_consistency_stats tests/test_consistency_stats.cpp)
+target_link_libraries(test_consistency_stats PRIVATE bierman::bierman)
+add_test(NAME test_consistency_stats COMMAND test_consistency_stats)

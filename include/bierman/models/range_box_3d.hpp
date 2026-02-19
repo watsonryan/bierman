@@ -1,10 +1,23 @@
 #pragma once
 
+#include <limits>
 #include <stdexcept>
 
 #include <Eigen/Core>
+#include <Eigen/SVD>
 
 namespace bierman::models {
+
+struct ObservabilityReport {
+  int rank = 0;
+  double condition = std::numeric_limits<double>::infinity();
+  double sigma_min = 0.0;
+  double sigma_max = 0.0;
+
+  bool well_conditioned(int required_rank = 3, double max_condition = 1e8) const {
+    return rank >= required_rank && std::isfinite(condition) && condition <= max_condition;
+  }
+};
 
 class RangeOnlyBox3D {
  public:
@@ -44,6 +57,32 @@ class RangeOnlyBox3D {
 
   Eigen::MatrixXd noise_cov() const {
     return sigma_range_ * sigma_range_ * Eigen::MatrixXd::Identity(tracker_pos_.rows(), tracker_pos_.rows());
+  }
+
+  ObservabilityReport observability(const Eigen::Ref<const Eigen::VectorXd>& x,
+                                    double svd_tol = 1e-10) const {
+    Eigen::MatrixXd H = jacobian(x);
+    H = H.leftCols(3);
+
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd(H, Eigen::ComputeThinU | Eigen::ComputeThinV);
+    const Eigen::VectorXd s = svd.singularValues();
+
+    ObservabilityReport rep;
+    rep.sigma_max = s.size() > 0 ? s(0) : 0.0;
+    rep.sigma_min = s.size() > 0 ? s(s.size() - 1) : 0.0;
+
+    const double thresh = svd_tol * (rep.sigma_max > 0.0 ? rep.sigma_max : 1.0);
+    rep.rank = 0;
+    for (Eigen::Index i = 0; i < s.size(); ++i) {
+      if (s(i) > thresh) {
+        ++rep.rank;
+      }
+    }
+
+    if (rep.sigma_min > 0.0) {
+      rep.condition = rep.sigma_max / rep.sigma_min;
+    }
+    return rep;
   }
 
  private:

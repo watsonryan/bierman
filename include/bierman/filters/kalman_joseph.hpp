@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <stdexcept>
 
 #include <Eigen/Core>
@@ -41,9 +42,43 @@ class KalmanJoseph {
     const Eigen::MatrixXd I = Eigen::MatrixXd::Identity(n, n);
     const Eigen::MatrixXd IKH = I - K * A_w;
 
-    // Joseph-stabilized covariance update with whitened measurement variance R=1.
     s.P = IKH * s.P * IKH.transpose() + K * K.transpose();
     s.P = 0.5 * (s.P + s.P.transpose());
+  }
+
+  template <typename PredictFn, typename JacobianFn>
+  static void update_scalar_iterated(KalmanState& s,
+                                     double y,
+                                     double sw,
+                                     PredictFn&& predict,
+                                     JacobianFn&& jacobian,
+                                     int max_iters = 4,
+                                     double tol = 1e-8) {
+    KalmanState prior = s;
+    Eigen::VectorXd x_ref = s.x;
+
+    KalmanState best = s;
+    double best_resid = std::numeric_limits<double>::infinity();
+
+    for (int it = 0; it < max_iters; ++it) {
+      KalmanState tmp = prior;
+      const double yhat = predict(x_ref);
+      const Eigen::RowVectorXd H = jacobian(x_ref);
+      update_scalar(tmp, H, y - yhat, sw);
+
+      const double resid = std::abs(y - predict(tmp.x));
+      if (resid < best_resid) {
+        best_resid = resid;
+        best = tmp;
+      }
+
+      if ((tmp.x - x_ref).norm() < tol) {
+        break;
+      }
+      x_ref = tmp.x;
+    }
+
+    s = best;
   }
 };
 

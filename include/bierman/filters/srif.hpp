@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdexcept>
+#include <limits>
 
 #include <Eigen/Core>
 #include <Eigen/QR>
@@ -88,6 +89,38 @@ class SRIF {
       res.residual_ss = qty.tail(qty.size() - n).squaredNorm();
     }
     return res;
+  }
+
+  template <typename PredictFn, typename JacobianFn>
+  static UpdateResult update_householder_iterated(const SRIFState& prior,
+                                                   const Eigen::Ref<const Eigen::VectorXd>& y,
+                                                   const Eigen::Ref<const Eigen::MatrixXd>& sqrtW,
+                                                   const Eigen::Ref<const Eigen::VectorXd>& x_init,
+                                                   PredictFn&& predict,
+                                                   JacobianFn&& jacobian,
+                                                   int max_iters = 4,
+                                                   double tol = 1e-8) {
+    Eigen::VectorXd x_ref = x_init;
+    UpdateResult best{};
+    double best_resid = std::numeric_limits<double>::infinity();
+
+    for (int it = 0; it < max_iters; ++it) {
+      const Eigen::VectorXd yhat = predict(x_ref);
+      const Eigen::MatrixXd H = jacobian(x_ref);
+      const Eigen::VectorXd z_lin = y - yhat + H * x_ref;
+      auto cur = update_householder(prior, H, z_lin, sqrtW);
+      const double resid = (y - predict(cur.x)).norm();
+      if (resid < best_resid) {
+        best_resid = resid;
+        best = cur;
+      }
+
+      if ((cur.x - x_ref).norm() < tol) {
+        break;
+      }
+      x_ref = cur.x;
+    }
+    return best;
   }
 
   static SRIFState predict(const SRIFState& prior,

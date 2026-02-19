@@ -28,6 +28,10 @@ inline void write_csv_row(std::ofstream& os, const std::vector<double>& vals) {
   os << '\n';
 }
 
+inline void write_csv_row(std::ofstream& os, const std::string& key, double val) {
+  os << key << ',' << val << '\n';
+}
+
 inline void write_csv_row(std::ofstream& os, double t, const Eigen::Ref<const Eigen::VectorXd>& x) {
   os << t;
   for (Eigen::Index i = 0; i < x.size(); ++i) {
