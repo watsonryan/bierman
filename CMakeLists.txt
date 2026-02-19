@@ -21,6 +21,7 @@ CPMAddPackage(
   URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
   OPTIONS
     "BUILD_TESTING OFF"
+    "EIGEN_BUILD_TESTING OFF"
     "EIGEN_BUILD_DOC OFF"
     "EIGEN_BUILD_PKGCONFIG OFF"
 )
@@ -41,6 +42,15 @@ target_include_directories(bierman INTERFACE
 
 target_link_libraries(bierman INTERFACE Eigen3::Eigen spdlog::spdlog)
 
+add_executable(app_static_compare apps/app_static_compare.cpp)
+target_link_libraries(app_static_compare PRIVATE bierman::bierman)
+
+add_executable(app_dynamic_compare apps/app_dynamic_compare.cpp)
+target_link_libraries(app_dynamic_compare PRIVATE bierman::bierman)
+
+add_executable(app_ukf_srukf_bias apps/app_ukf_srukf_bias.cpp)
+target_link_libraries(app_ukf_srukf_bias PRIVATE bierman::bierman)
+
 enable_testing()
 
 add_executable(test_ud tests/test_ud.cpp)
@@ -58,3 +68,11 @@ add_test(NAME test_chol_update COMMAND test_chol_update)
 add_executable(test_kalman_joseph tests/test_kalman_joseph.cpp)
 target_link_libraries(test_kalman_joseph PRIVATE bierman::bierman)
 add_test(NAME test_kalman_joseph COMMAND test_kalman_joseph)
+
+add_executable(test_filter_equivalence_linear tests/test_filter_equivalence_linear.cpp)
+target_link_libraries(test_filter_equivalence_linear PRIVATE bierman::bierman)
+add_test(NAME test_filter_equivalence_linear COMMAND test_filter_equivalence_linear)
+
+add_executable(test_ukf_srukf tests/test_ukf_srukf.cpp)
+target_link_libraries(test_ukf_srukf PRIVATE bierman::bierman)
+add_test(NAME test_ukf_srukf COMMAND test_ukf_srukf)
