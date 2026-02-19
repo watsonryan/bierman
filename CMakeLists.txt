@@ -126,3 +126,6 @@ add_test(NAME test_iterated_updates COMMAND test_iterated_updates)
 add_executable(test_consistency_stats tests/test_consistency_stats.cpp)
 target_link_libraries(test_consistency_stats PRIVATE bierman::bierman)
 add_test(NAME test_consistency_stats COMMAND test_consistency_stats)
+
+add_executable(bench_filter_update tests/bench_filter_update.cpp)
+target_link_libraries(bench_filter_update PRIVATE bierman::bierman)
