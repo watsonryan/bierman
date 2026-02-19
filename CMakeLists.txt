@@ -54,3 +54,7 @@ add_test(NAME test_qr COMMAND test_qr)
 add_executable(test_chol_update tests/test_chol_update.cpp)
 target_link_libraries(test_chol_update PRIVATE bierman::bierman)
 add_test(NAME test_chol_update COMMAND test_chol_update)
+
+add_executable(test_kalman_joseph tests/test_kalman_joseph.cpp)
+target_link_libraries(test_kalman_joseph PRIVATE bierman::bierman)
+add_test(NAME test_kalman_joseph COMMAND test_kalman_joseph)
