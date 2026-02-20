@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include <Eigen/Core>
+#include <Eigen/Cholesky>
 
 namespace bierman::filters {
 
@@ -58,7 +59,7 @@ class KalmanJoseph {
     Eigen::VectorXd x_ref = s.x;
 
     KalmanState best = s;
-    double best_resid = std::numeric_limits<double>::infinity();
+    double best_cost = std::numeric_limits<double>::infinity();
 
     for (int it = 0; it < max_iters; ++it) {
       KalmanState tmp = prior;
@@ -66,9 +67,14 @@ class KalmanJoseph {
       const Eigen::RowVectorXd H = jacobian(x_ref);
       update_scalar(tmp, H, y - yhat, sw);
 
-      const double resid = std::abs(y - predict(tmp.x));
-      if (resid < best_resid) {
-        best_resid = resid;
+      const Eigen::VectorXd dx = tmp.x - prior.x;
+      const double prior_cost = (dx.transpose() * prior.P.ldlt().solve(dx))(0);
+      const double meas_res = y - predict(tmp.x);
+      const double meas_cost = (sw * meas_res) * (sw * meas_res);
+      const double cost = prior_cost + meas_cost;
+
+      if (cost < best_cost) {
+        best_cost = cost;
         best = tmp;
       }
 

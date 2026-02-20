@@ -3,3 +3,6 @@ build-*/
 .DS_Store
 
 .cpm-cache/
+output_dynamic/
+output_static/
+output_ukf_srukf_bias/
