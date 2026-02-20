@@ -6,7 +6,6 @@
 
 #include <CLI/CLI.hpp>
 #include <Eigen/Cholesky>
-#include <Eigen/LU>
 #include <Eigen/SVD>
 #include <spdlog/spdlog.h>
 
@@ -126,6 +125,8 @@ int main(int argc, char** argv) {
   bierman::util::write_csv_header(fsrif, {"t", "x", "y", "z"});
   bierman::util::write_csv_header(fsum, {"metric", "value"});
 
+  const Eigen::MatrixXd sqrtW = (1.0 / sigma_range) * Eigen::MatrixXd::Identity(trackers.rows(), trackers.rows());
+
   for (int k = 0; k < steps; ++k) {
     const double t = k * dt;
     truth = dyn_truth.propagate_truth(dt, truth);
@@ -145,6 +146,11 @@ int main(int argc, char** argv) {
     ud.U = ud.U.triangularView<Eigen::Upper>();
     ud.d = ud.d.cwiseMax(1e-12);
     bierman::filters::UDFilter::predict_diagonal_q(ud, Phi, Q.diagonal(), G);
+
+    Eigen::MatrixXd PhiInv = Phi.ldlt().solve(Eigen::MatrixXd::Identity(Phi.rows(), Phi.cols()));
+    Eigen::MatrixXd Lq = Q.llt().matrixL();
+    Eigen::MatrixXd Rw = Lq.ldlt().solve(Eigen::MatrixXd::Identity(Lq.rows(), Lq.cols()));
+    srif = bierman::filters::SRIF::predict(srif, PhiInv, Rw, G);
 
     for (Eigen::Index i = 0; i < trackers.rows(); ++i) {
       Eigen::VectorXd yhat = range_predict(kf.x, trackers);
@@ -203,12 +209,19 @@ int main(int argc, char** argv) {
       Eigen::MatrixXd Hu = range_jac(ud.x, trackers);
       bierman::filters::UDFilter::update_scalar(ud, Hu.row(i), y(i) - yhu(i), sigma_range * sigma_range);
     }
-    const Eigen::MatrixXd Pud = bierman::linalg::ud_reconstruct(ud.U, ud.d);
-    const Eigen::MatrixXd Fud = Pud.ldlt().solve(Eigen::MatrixXd::Identity(Pud.rows(), Pud.cols()));
-    const Eigen::MatrixXd Rud = Fud.llt().matrixU();
-    srif = bierman::filters::SRIFState{Rud, Rud * ud.x};
-    if (iterated) {
-      ++srif_iter_fallbacks;
+
+    {
+      const bierman::filters::SRIFState srif_prior = srif;
+      const Eigen::VectorXd x_prior = bierman::linalg::solve_upper(srif_prior.R, srif_prior.z);
+      const Eigen::VectorXd yhat_prior = range_predict(x_prior, trackers);
+      const Eigen::MatrixXd H_prior = range_jac(x_prior, trackers);
+      const Eigen::VectorXd zlin = y - yhat_prior + H_prior * x_prior;
+      const auto single = bierman::filters::SRIF::update_householder(srif_prior, H_prior, zlin, sqrtW);
+
+      if (iterated) {
+        ++srif_iter_fallbacks;
+      }
+      srif = single.state;
     }
 
     kf_stats.add_nees(bierman::util::nees(kf.x.head<3>() - truth.head<3>(), kf.P.topLeftCorner(3, 3)));
